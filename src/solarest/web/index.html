@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solar Power Estimation</title>
+<meta name="description" content="Estimate how much electricity a solar PV system would generate over a year at any location, using ECMWF ERA5 reanalysis weather.">
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>☀️</text></svg>">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap masthead-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">☀</span>
+      <div>
+        <h1>Solar Power Estimation</h1>
+        <p class="tagline">A year of generation for any rooftop, from real historical weather.</p>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap layout">
+
+  <!-- ------------------------------------------------ controls -->
+  <form id="controls" class="panel controls" autocomplete="off">
+    <section class="field-group">
+      <h2>Location</h2>
+
+      <label for="place">Search for a place</label>
+      <div class="search-row">
+        <input type="search" id="place" name="place" placeholder="e.g. Bristol, UK" aria-describedby="place-help">
+        <button type="button" id="locate" class="ghost" title="Use my current location">Use&nbsp;my&nbsp;location</button>
+      </div>
+      <p id="place-help" class="help">Pick a result, or type coordinates directly below.</p>
+      <ul id="place-results" class="results-list" role="listbox" aria-label="Search results" hidden></ul>
+
+      <div class="grid-2">
+        <div>
+          <label for="latitude">Latitude</label>
+          <input type="number" id="latitude" name="latitude" step="0.0001" min="-90" max="90" value="51.4545" required>
+        </div>
+        <div>
+          <label for="longitude">Longitude</label>
+          <input type="number" id="longitude" name="longitude" step="0.0001" min="-180" max="180" value="-2.5879" required>
+        </div>
+      </div>
+      <p id="site-label" class="help site-label">Bristol, England, United Kingdom</p>
+    </section>
+
+    <section class="field-group">
+      <h2>System</h2>
+
+      <label for="capacity">Array size <span class="unit">kWp (DC)</span></label>
+      <input type="number" id="capacity" name="capacity" step="0.1" min="0.1" max="1000" value="4">
+      <p class="help">A typical domestic array is 3–6&nbsp;kWp; roughly 2.5&nbsp;kWp per 10&nbsp;m² of roof.</p>
+
+      <div class="grid-2">
+        <div>
+          <label for="tilt">Tilt <span class="unit" id="tilt-value">35°</span></label>
+          <input type="range" id="tilt" name="tilt" min="0" max="90" step="1" value="35">
+          <p class="help tight">0° flat, 90° vertical</p>
+        </div>
+        <div>
+          <label for="azimuth">Direction <span class="unit" id="azimuth-value">South</span></label>
+          <input type="range" id="azimuth" name="azimuth" min="0" max="360" step="5" value="180">
+          <p class="help tight">Which way the panels face</p>
+        </div>
+      </div>
+
+      <label for="mount">Mounting</label>
+      <select id="mount" name="mount"></select>
+
+      <label for="module">Panel type</label>
+      <select id="module" name="module"></select>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+
+        <label for="years">Years of weather history <span class="unit" id="years-value">10</span></label>
+        <input type="range" id="years" name="years" min="1" max="20" step="1" value="10">
+
+        <label for="shading">Shading loss <span class="unit" id="shading-value">3%</span></label>
+        <input type="range" id="shading" name="shading" min="0" max="60" step="1" value="3">
+        <p class="help tight">Trees, chimneys, neighbouring buildings.</p>
+
+        <div class="grid-2">
+          <div>
+            <label for="dcac">DC/AC ratio</label>
+            <input type="number" id="dcac" name="dcac" step="0.05" min="0.6" max="2.5" value="1.15">
+          </div>
+          <div>
+            <label for="albedo">Ground albedo</label>
+            <input type="number" id="albedo" name="albedo" step="0.05" min="0" max="1" value="0.2">
+          </div>
+        </div>
+
+        <label class="checkbox">
+          <input type="checkbox" id="optimise" name="optimise">
+          <span>Also find the best tilt &amp; direction (slower)</span>
+        </label>
+      </details>
+    </section>
+
+    <button type="submit" id="run" class="primary">Estimate a year</button>
+    <p id="form-error" class="error" role="alert" hidden></p>
+  </form>
+
+  <!-- ------------------------------------------------- results -->
+  <div id="results" class="results">
+
+    <section class="panel empty-state" id="empty">
+      <h2>How this works</h2>
+      <p>
+        Pick a location and describe the system. The estimator pulls <strong>hourly
+        historical weather</strong> for that spot from the Open-Meteo archive — the
+        ECMWF&nbsp;ERA5 reanalysis, the same dataset used for climate research —
+        and runs every hour of the last decade through a physical model of the array.
+      </p>
+      <ol class="steps">
+        <li><strong>Sun position</strong> for every hour, from the NOAA solar algorithm.</li>
+        <li><strong>Irradiance on the panel plane</strong>, via the Perez sky-diffuse model.</li>
+        <li><strong>Cell temperature</strong> from air temperature, wind and mounting style.</li>
+        <li><strong>AC output</strong> after temperature derate, system losses and the inverter.</li>
+      </ol>
+      <p class="help">
+        Because it runs ten separate years, you get the spread between a good year
+        and a poor one — not a single number pretending to be certain.
+      </p>
+    </section>
+
+    <div id="output" hidden>
+      <p id="synthetic-banner" class="banner warn" hidden>
+        <strong>Synthetic data.</strong> This server is running with the offline
+        clear-sky generator. Figures are illustrative only — they assume cloudless
+        skies all year and will be far too high.
+      </p>
+
+      <!-- headline -->
+      <section class="panel">
+        <div class="headline">
+          <div class="hero">
+            <span class="hero-label">Expected annual generation</span>
+            <span class="hero-number" id="hero-kwh">—</span>
+            <span class="hero-unit">kWh per year</span>
+            <span class="hero-range" id="hero-range"></span>
+          </div>
+          <dl class="stat-grid" id="stat-grid"></dl>
+        </div>
+        <p class="help" id="provenance"></p>
+      </section>
+
+      <!-- monthly -->
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Generation by month</h2>
+            <p class="help" id="monthly-sub"></p>
+          </div>
+          <button type="button" class="ghost small" data-toggle="monthly-table">Show table</button>
+        </div>
+        <div class="chart-host" id="monthly-chart"></div>
+        <div class="table-host" id="monthly-table" hidden></div>
+      </section>
+
+      <!-- diurnal -->
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>When the power arrives</h2>
+            <p class="help">Average output by hour of day and month, in local standard time. This shape is what battery sizing keys off.</p>
+          </div>
+          <button type="button" class="ghost small" data-toggle="diurnal-table">Show table</button>
+        </div>
+        <div class="chart-host" id="diurnal-chart"></div>
+        <div class="scale-note"><span>lower</span><div class="ramp-strip" aria-hidden="true"></div><span>higher output</span></div>
+        <div class="table-host" id="diurnal-table" hidden></div>
+      </section>
+
+      <!-- losses -->
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Where the sunlight goes</h2>
+            <p class="help" id="losses-sub"></p>
+          </div>
+        </div>
+        <div class="chart-host" id="loss-chart"></div>
+        <div class="legend" id="loss-legend"></div>
+      </section>
+
+      <!-- year to year -->
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Year to year</h2>
+            <p class="help" id="annual-sub"></p>
+          </div>
+          <button type="button" class="ghost small" data-toggle="annual-table">Show table</button>
+        </div>
+        <div class="chart-host" id="annual-chart"></div>
+        <div class="table-host" id="annual-table" hidden></div>
+      </section>
+
+      <!-- orientation -->
+      <section class="panel" id="orientation-panel" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>Best orientation</h2>
+            <p class="help" id="orientation-sub"></p>
+          </div>
+          <button type="button" class="ghost small" id="apply-orientation">Apply</button>
+        </div>
+        <div class="chart-host" id="orientation-chart"></div>
+        <div class="scale-note"><span>less output</span><div class="ramp-strip" aria-hidden="true"></div><span>more output</span></div>
+      </section>
+
+      <!-- export -->
+      <section class="panel">
+        <h2>Take the data with you</h2>
+        <p class="help">
+          An 8760-hour typical year in local standard time, assembled from real
+          months rather than averaged — so cloudy runs survive, which is what makes
+          it usable for battery sizing.
+        </p>
+        <button type="button" class="ghost" id="download-csv">Download hourly CSV</button>
+      </section>
+    </div>
+
+    <div id="loading" class="panel loading" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <p id="loading-text">Fetching ten years of hourly weather…</p>
+    </div>
+  </div>
+</main>
+
+<footer class="wrap site-footer">
+  <p>
+    Weather from the <a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a>
+    Historical Weather API (ECMWF ERA5 reanalysis). PV model after NREL PVWatts&nbsp;v5.
+    Estimates carry real uncertainty — treat them as a planning guide, not a quotation.
+  </p>
+</footer>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
