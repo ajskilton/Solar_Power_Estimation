@@ -6,6 +6,11 @@ Give it a location and a rough description of a PV system, and it estimates how
 much electricity that system would generate over a year — hour by hour, from a
 decade of real historical weather rather than a rule of thumb.
 
+**[Try it in your browser](https://ajskilton.github.io/Solar_Power_Estimation/)** — no install,
+no sign-up, nothing sent to a server.
+
+Or run it locally:
+
 ```bash
 pip install -e ".[dev]"
 solarest serve            # then open http://127.0.0.1:8000
@@ -188,6 +193,53 @@ small, since the battery absorbs that flicker in reality too.
 
 ---
 
+## Where it runs
+
+The same page works two ways, and decides which at start-up by asking for
+`/api/health`:
+
+| | Backend | Weather |
+|---|---|---|
+| `solarest serve` | FastAPI, on your machine | fetched by the server, cached on disk |
+| GitHub Pages | **the browser**, via Pyodide | fetched by the browser, cached in the tab |
+
+On the hosted site there is no server at all. The same Python package — the one
+the tests exercise and pvlib is checked against — is loaded into the tab as
+WebAssembly and called directly. Nothing you type leaves your browser except
+the request to Open-Meteo for the weather at your coordinates.
+
+That costs about 10 MB on the first visit (Pyodide plus numpy, from a CDN,
+cached afterwards) and a few seconds to boot. A ten-year estimate then takes a
+second or two. The alternative would have been porting a thousand lines of
+validated numpy to JavaScript and maintaining two implementations that had to
+agree; a test asserts the two backends return the same payload key for key,
+which is much easier to keep true when there is only one model.
+
+### Publishing it yourself
+
+Push to `main` and the workflow in `.github/workflows/pages.yml` runs the tests,
+builds the site and deploys it. It needs **Settings → Pages → Source: GitHub
+Actions** set once, in the repository.
+
+```bash
+python scripts/build_site.py --out site      # build it locally
+python -m http.server -d site 8000           # and serve it statically
+```
+
+The build is a file copy: the frontend, plus the Python modules the browser
+needs. `api.py`, `service.py` and `cli.py` are left out — they are the only
+ones that want FastAPI or pydantic, and a test walks the imports of everything
+shipped to make sure nothing else does either.
+
+To serve Pyodide from your own host rather than the public CDN — for an
+air-gapped deployment, or to avoid the dependency — point the build at it:
+
+```bash
+python scripts/build_site.py --out site --pyodide-base /pyodide/
+```
+
+---
+
 ## Using it
 
 ### The website
@@ -329,7 +381,7 @@ Treat the output as a planning guide with a realistic uncertainty of roughly
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                       # 333 tests
+pytest                       # 367 tests
 solarest serve --reload
 ```
 
@@ -353,6 +405,9 @@ src/solarest/
   battery.py     dispatch, the sizing curve, diminishing returns
   sizing.py      demand against generation, and what the answer is worth
   service.py     request models and the estimate and sizing use cases
+  presenter.py   defaults and response shaping; numpy only, no pydantic
+  browser.py     Open-Meteo through the browser's fetch, for the hosted build
+  webapp.py      the surface the browser page calls into
   api.py         FastAPI app
   cli.py         `solarest serve`, `estimate` and `size`
   web/           the single-page frontend (no build step, no dependencies)
@@ -361,7 +416,14 @@ src/solarest/
 ```
 
 The frontend is plain HTML, CSS and ES modules with hand-rolled SVG charts —
-no bundler, no framework, nothing fetched from a CDN.
+no bundler, no framework. Run locally it fetches nothing from a CDN at all; the
+hosted build pulls Pyodide and numpy from one, because shipping 10 MB of
+WebAssembly through git would be worse.
+
+`scripts/build_site.py` assembles the static site, and `tests/test_build_site.py`
+checks that what it ships can actually run: that the JavaScript and the build
+agree on the module list, and that no module reaching the browser imports
+something Pyodide will not have.
 
 ---
 

@@ -3,6 +3,7 @@
  */
 
 import { barChart, curveChart, dayProfile, heatmap, stackedBar, legend, table } from "./charts.js";
+import { backend, reportProgress } from "./backend.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
@@ -38,9 +39,7 @@ function compassName(degrees) {
 /** Ask the server what mount types, module types and defaults exist. */
 async function loadOptions() {
   try {
-    const response = await fetch("/api/options");
-    if (!response.ok) return;
-    const data = await response.json();
+    const data = await (await backend()).options();
     for (const item of data.mounts) {
       $("mount").add(new Option(item.label, item.value));
     }
@@ -103,9 +102,7 @@ async function searchPlaces(query) {
     return;
   }
   try {
-    const response = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
-    if (!response.ok) throw new Error("search failed");
-    renderPlaces((await response.json()).results);
+    renderPlaces((await (await backend()).geocode(query)).results);
   } catch {
     $("place-results").hidden = true;
   }
@@ -123,8 +120,13 @@ function applyLatitudeDefaults(latitude) {
 
 /* -------------------------------------------------------------- request */
 
+/** ?synthetic=1 forces the offline clear-sky generator, for demos and testing. */
+const syntheticRequested = () =>
+  new URLSearchParams(location.search).get("synthetic") === "1";
+
 function buildRequest(includeHourly) {
   return {
+    synthetic: syntheticRequested(),
     latitude: Number($("latitude").value),
     longitude: Number($("longitude").value),
     name: $("site-label").textContent || null,
@@ -192,13 +194,8 @@ async function runEstimate(event) {
     : `Fetching ${request.years} years of hourly weather…`;
 
   try {
-    const response = await fetch(sizing ? "/api/sizing" : "/api/estimate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(request),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.detail || `request failed (${response.status})`);
+    const api = await backend();
+    const payload = sizing ? await api.sizing(request) : await api.estimate(request);
     state.lastResult = payload;
     render(payload);
     $("output").hidden = false;
@@ -819,13 +816,9 @@ async function downloadCsv() {
   button.disabled = true;
   button.textContent = "Preparing…";
   try {
-    const response = await fetch("/api/estimate.csv", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...state.lastRequest, include_hourly: true, optimise: false }),
+    const blob = await (await backend()).csv({
+      ...state.lastRequest, include_hourly: true, optimise: false,
     });
-    if (!response.ok) throw new Error("download failed");
-    const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -844,6 +837,15 @@ async function downloadCsv() {
 /* ----------------------------------------------------------------- wire */
 
 function init() {
+  // Booting the in-browser runtime takes a few seconds and several megabytes;
+  // say so rather than showing a page that looks broken.
+  reportProgress((message) => {
+    const banner = $("boot-status");
+    banner.textContent = message;
+    banner.hidden = !message;
+    if (message && !$("loading").hidden) $("loading-text").textContent = message;
+  });
+
   loadOptions();
 
   $("controls").addEventListener("submit", runEstimate);

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 
-import httpx
+try:
+    import httpx
+except ModuleNotFoundError:  # pragma: no cover - see solarest.weather
+    httpx = None
 
 GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
 

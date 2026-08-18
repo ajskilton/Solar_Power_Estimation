@@ -26,8 +26,20 @@ from datetime import date
 from pathlib import Path
 from typing import Iterable, Protocol, Sequence
 
-import httpx
 import numpy as np
+
+try:
+    import httpx
+except ModuleNotFoundError:  # pragma: no cover - browser builds ship numpy only
+    # The model chain needs nothing but numpy. Only the archive client below
+    # talks HTTP, and in a browser build the fetching is done by the host
+    # instead (see solarest.browser), so httpx is genuinely optional.
+    httpx = None
+
+# Alias so the except clauses below stay valid when httpx is absent. Those
+# paths are unreachable without a client, but an AttributeError raised while
+# handling another exception would be a miserable thing to debug.
+_HTTP_ERROR: type[BaseException] = httpx.HTTPError if httpx is not None else OSError
 
 from .solarpos import SOLAR_CONSTANT, solar_position
 
@@ -207,6 +219,19 @@ def standard_utc_offset(timezone_name: str) -> int:
     return min(offsets) if offsets else 0
 
 
+def _new_client(timeout: float):
+    """A configured httpx client, or a clear error if httpx is not installed."""
+    if httpx is None:  # pragma: no cover - only reachable in a browser build
+        raise ArchiveError(
+            "httpx is not installed, so this build cannot fetch weather itself; "
+            "use solarest.browser.BrowserArchive, or install the full package"
+        )
+    return httpx.AsyncClient(
+        timeout=timeout,
+        headers={"User-Agent": "solarest/0.1 (+solar yield estimator)"},
+    )
+
+
 class OpenMeteoArchive:
     """Fetches ERA5 reanalysis weather from Open-Meteo, with an on-disk cache.
 
@@ -279,13 +304,10 @@ class OpenMeteoArchive:
             "timezone": "auto",
         }
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(
-            timeout=self.timeout,
-            headers={"User-Agent": "solarest/0.1 (+solar yield estimator)"},
-        )
+        client = self._client or _new_client(self.timeout)
         try:
             response = await client.get(ARCHIVE_URL, params=params)
-        except httpx.HTTPError as exc:
+        except _HTTP_ERROR as exc:
             raise ArchiveError(f"could not reach the Open-Meteo archive: {exc}") from exc
         finally:
             if owns_client:
@@ -382,9 +404,7 @@ class OpenMeteoArchive:
     ) -> dict[int, WeatherSeries]:
         semaphore = asyncio.Semaphore(self.max_concurrency)
         owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(
-            timeout=self.timeout, headers={"User-Agent": "solarest/0.1 (+solar yield estimator)"}
-        )
+        client = self._client or _new_client(self.timeout)
         try:
 
             async def one(year: int) -> tuple[int, WeatherSeries]:
@@ -416,7 +436,7 @@ class OpenMeteoArchive:
         }
         try:
             response = await client.get(ARCHIVE_URL, params=params)
-        except httpx.HTTPError as exc:
+        except _HTTP_ERROR as exc:
             raise ArchiveError(f"could not reach the Open-Meteo archive: {exc}") from exc
 
         if response.status_code != 200:

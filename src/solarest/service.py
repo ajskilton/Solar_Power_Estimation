@@ -1,8 +1,14 @@
-"""Application layer: request models and the estimate use case.
+"""Application layer: request validation, and the two use cases.
 
 Kept separate from :mod:`solarest.api` so the same logic is reachable from the
-CLI, from tests, and later from the battery-sizing work, without going through
-HTTP.
+CLI and from tests without going through HTTP.
+
+This module owns only the pydantic request models and the async orchestration.
+Defaults and response shaping live in :mod:`solarest.presenter`, which depends
+on nothing but numpy -- that is what lets the browser build run the same model
+chain without pydantic or FastAPI. Request models here validate, then hand
+straight over to the presenter's builders, so there is one definition of what
+a default system or a default household is.
 """
 
 from __future__ import annotations
@@ -14,12 +20,23 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .battery import BatterySpec
-from .load import ARCHETYPES, HouseholdShape, LoadProfile, synthesise
-from .optimize import OrientationResult, equator_facing_azimuth, optimise_orientation, rule_of_thumb_tilt
-from .pvmodel import DEFAULT_LOSSES, MODULE_TYPES, MOUNTS, SystemSpec, combine_losses
-from .results import EstimateResult, result_to_dict, summarise
+from .load import HouseholdShape, LoadProfile
+from .optimize import OrientationResult, optimise_orientation
+from .presenter import (
+    EstimateOutcome,
+    SizingOutcome,
+    build_battery_spec,
+    build_load_profile,
+    build_system_spec,
+    default_loss_breakdown,
+    household_options,
+    outcome_to_dict,
+    sizing_to_dict,
+)
+from .pvmodel import SystemSpec
+from .results import EstimateResult, summarise
 from .simulate import SitePrecompute, precompute
-from .sizing import ConfidenceBand, SizingResult, size_for_household
+from .sizing import size_for_household
 from .weather import (
     DEFAULT_YEARS,
     MAX_YEARS,
@@ -63,31 +80,7 @@ class SystemRequest(BaseModel):
 
     def to_spec(self, latitude: float) -> SystemSpec:
         """Resolve defaults against the site and build a :class:`SystemSpec`."""
-        losses = dict(DEFAULT_LOSSES)
-        if self.shading_pct is not None:
-            losses["shading"] = self.shading_pct / 100.0
-        if self.system_losses_pct is not None:
-            # An explicit total replaces the itemised stack entirely.
-            losses = {"system": self.system_losses_pct / 100.0}
-
-        return SystemSpec(
-            dc_capacity_kw=self.dc_capacity_kw,
-            tilt_deg=(
-                rule_of_thumb_tilt(latitude) if self.tilt_deg is None else self.tilt_deg
-            ),
-            azimuth_deg=(
-                equator_facing_azimuth(latitude)
-                if self.azimuth_deg is None
-                else self.azimuth_deg
-            ),
-            mount=self.mount,
-            module_type=self.module_type,
-            dc_ac_ratio=self.dc_ac_ratio,
-            inverter_efficiency=self.inverter_efficiency,
-            albedo=self.albedo,
-            losses=losses,
-            transposition_model=self.transposition_model,
-        )
+        return build_system_spec(latitude, **self.model_dump())
 
 
 class EstimateRequest(BaseModel):
@@ -114,17 +107,6 @@ class EstimateRequest(BaseModel):
     @classmethod
     def _strip_name(cls, value: str | None) -> str | None:
         return value.strip() or None if value else None
-
-
-@dataclass(frozen=True)
-class EstimateOutcome:
-    """Everything the estimate use case produces."""
-
-    site: SiteInfo
-    weather: WeatherSeries
-    spec: SystemSpec
-    result: EstimateResult
-    orientation: OrientationResult | None
 
 
 async def run_estimate(
@@ -165,61 +147,6 @@ def _model(
     result = summarise(prepared.simulate(spec))
     orientation = optimise_orientation(prepared, spec) if optimise else None
     return result, orientation
-
-
-def outcome_to_dict(outcome: EstimateOutcome, include_hourly: bool = True) -> dict:
-    """Serialise an :class:`EstimateOutcome` into the public JSON shape."""
-    payload = {
-        "site": {
-            "latitude": round(outcome.site.latitude, 4),
-            "longitude": round(outcome.site.longitude, 4),
-            "elevation_m": round(outcome.site.elevation_m, 1),
-            "timezone": outcome.site.timezone,
-            "utc_offset_hours": outcome.site.utc_offset_seconds / 3600.0,
-        },
-        "weather": {
-            "source": outcome.weather.source,
-            "synthetic": outcome.weather.synthetic,
-            "years": outcome.result.annual.years_used,
-            "hours": len(outcome.weather),
-        },
-        "system": {
-            "dc_capacity_kw": outcome.spec.dc_capacity_kw,
-            "tilt_deg": round(outcome.spec.tilt_deg, 1),
-            "azimuth_deg": round(outcome.spec.azimuth_deg, 1),
-            "mount": outcome.spec.mount,
-            "mount_label": MOUNTS[outcome.spec.mount].label,
-            "module_type": outcome.spec.module_type,
-            "temperature_coefficient_pct_per_c": round(
-                MODULE_TYPES[outcome.spec.module_type] * 100, 3
-            ),
-            "dc_ac_ratio": outcome.spec.dc_ac_ratio,
-            "inverter_ac_kw": round(outcome.spec.ac_capacity_kw, 3),
-            "albedo": outcome.spec.albedo,
-            "system_losses_pct": round(outcome.spec.total_loss_fraction * 100, 2),
-            "transposition_model": outcome.spec.transposition_model,
-        },
-        **result_to_dict(outcome.result, hourly=include_hourly),
-    }
-
-    if outcome.orientation is not None:
-        best = outcome.orientation
-        payload["orientation"] = {
-            "best_tilt_deg": round(best.best_tilt_deg, 1),
-            "best_azimuth_deg": round(best.best_azimuth_deg, 1),
-            "best_annual_kwh": round(best.best_annual_kwh, 1),
-            "baseline_annual_kwh": round(best.baseline_annual_kwh, 1),
-            "improvement_pct": round(best.improvement_pct, 2),
-            "surface": [
-                {
-                    "tilt_deg": round(c.tilt_deg, 1),
-                    "azimuth_deg": round(c.azimuth_deg, 1),
-                    "annual_kwh": round(c.annual_kwh, 1),
-                }
-                for c in best.surface
-            ],
-        }
-    return payload
 
 
 class HouseholdRequest(BaseModel):
@@ -267,13 +194,7 @@ class BatteryRequest(BaseModel):
 
     def to_spec(self) -> BatterySpec:
         """Build the domain object."""
-        return BatterySpec(
-            usable_capacity_kwh=self.usable_capacity_kwh,
-            max_charge_kw=self.max_charge_kw,
-            max_discharge_kw=self.max_discharge_kw,
-            round_trip_efficiency=self.round_trip_efficiency,
-            initial_soc_frac=self.initial_soc_frac,
-        )
+        return build_battery_spec(**self.model_dump())
 
 
 class ConsumptionRequest(BaseModel):
@@ -315,13 +236,12 @@ class ConsumptionRequest(BaseModel):
 
     def to_profile(self, latitude: float) -> LoadProfile:
         """Build the 8760-hour demand series this request describes."""
-        if self.hourly_kwh is not None:
-            return LoadProfile.from_hourly(self.hourly_kwh)
-        return synthesise(
+        return build_load_profile(
+            latitude,
             annual_kwh=self.annual_kwh,
             monthly_kwh=self.monthly_kwh,
+            hourly_kwh=self.hourly_kwh,
             household=self.household.to_shape(),
-            latitude=latitude,
         )
 
 
@@ -339,14 +259,6 @@ class SizingRequest(EstimateRequest):
         le=0.3,
         description="Half-width of the daytime-fraction band explored, absolute",
     )
-
-
-@dataclass(frozen=True)
-class SizingOutcome:
-    """An estimate and the sizing built on top of it."""
-
-    estimate: EstimateOutcome
-    sizing: SizingResult
 
 
 async def run_sizing(
@@ -376,140 +288,21 @@ async def run_sizing(
     return SizingOutcome(estimate=estimate, sizing=sizing)
 
 
-def _band_to_dict(band: ConfidenceBand | None) -> dict | None:
-    if band is None:
-        return None
-    return {
-        "low_kwh": round(band.low_kwh, 1),
-        "high_kwh": round(band.high_kwh, 1),
-        "low_daytime_fraction": round(band.low_daytime_fraction, 4),
-        "high_daytime_fraction": round(band.high_daytime_fraction, 4),
-        "spread_pct": round(band.spread_pct, 2),
-    }
-
-
-def sizing_to_dict(outcome: SizingOutcome, include_hourly: bool = False) -> dict:
-    """Serialise a :class:`SizingOutcome` into the public JSON shape."""
-    sizing = outcome.sizing
-    dispatch = sizing.result
-
-    payload = outcome_to_dict(outcome.estimate, include_hourly=include_hourly)
-    payload["consumption"] = {
-        "annual_kwh": round(dispatch.load_kwh, 1),
-        "source": sizing.load_source,
-        "measured": sizing.measured_load,
-        "daytime_fraction": round(sizing.daytime_fraction, 4),
-    }
-    payload["battery"] = {
-        "usable_capacity_kwh": sizing.battery.usable_capacity_kwh,
-        "max_charge_kw": round(sizing.battery.charge_limit_kw, 2),
-        "max_discharge_kw": round(sizing.battery.discharge_limit_kw, 2),
-        "round_trip_efficiency": sizing.battery.round_trip_efficiency,
-    }
-    payload["balance"] = {
-        "generation_kwh": round(dispatch.generation_kwh, 1),
-        "load_kwh": round(dispatch.load_kwh, 1),
-        "avoided_import_kwh": round(dispatch.avoided_import_kwh, 1),
-        "import_kwh": round(dispatch.total_import_kwh, 1),
-        "export_kwh": round(dispatch.total_export_kwh, 1),
-        "direct_use_kwh": round(float(dispatch.direct_kwh.sum()), 1),
-        "from_battery_kwh": round(float(dispatch.discharge_kwh.sum()), 1),
-        "storage_loss_kwh": round(dispatch.storage_loss_kwh, 1),
-        "self_sufficiency_pct": round(dispatch.self_sufficiency_pct, 1),
-        "self_consumption_pct": round(dispatch.self_consumption_pct, 1),
-        "equivalent_full_cycles": round(dispatch.equivalent_full_cycles, 1),
-        "battery_contribution_kwh": round(sizing.battery_contribution_kwh, 1),
-        "pv_only_avoided_import_kwh": round(sizing.pv_only.avoided_import_kwh, 1),
-        "pv_only_self_sufficiency_pct": round(sizing.pv_only.self_sufficiency_pct, 1),
-    }
-    payload["confidence"] = {
-        "band": _band_to_dict(sizing.band),
-        "band_pv_only": _band_to_dict(sizing.band_pv_only),
-        "note": _confidence_note(sizing),
-    }
-    payload["sizing_curve"] = [
-        {
-            "capacity_kwh": entry.capacity_kwh,
-            "avoided_import_kwh": round(entry.avoided_import_kwh, 1),
-            "self_sufficiency_pct": round(entry.self_sufficiency_pct, 1),
-            "self_consumption_pct": round(entry.self_consumption_pct, 1),
-            "export_kwh": round(entry.export_kwh, 1),
-            "equivalent_full_cycles": round(entry.equivalent_full_cycles, 1),
-            "marginal_kwh_per_kwh": round(entry.marginal_kwh_per_kwh, 1),
-        }
-        for entry in sizing.curve
-    ]
-    payload["suggested_capacity_kwh"] = sizing.suggested_capacity_kwh
-    payload["diurnal_balance"] = {
-        "by_month": {
-            name: [[round(float(v), 4) for v in row] for row in grid]
-            for name, grid in sizing.diurnal.by_month.items()
-        },
-        "by_year": {
-            name: [round(float(v), 4) for v in values]
-            for name, values in sizing.diurnal.by_year.items()
-        },
-    }
-    payload["monthly_balance"] = [
-        {
-            "month": m.month,
-            "generation_kwh": round(m.generation_kwh, 1),
-            "load_kwh": round(m.load_kwh, 1),
-            "direct_kwh": round(m.direct_kwh, 1),
-            "from_battery_kwh": round(m.discharge_kwh, 1),
-            "import_kwh": round(m.import_kwh, 1),
-            "export_kwh": round(m.export_kwh, 1),
-            "self_sufficiency_pct": round(m.self_sufficiency_pct, 1),
-        }
-        for m in sizing.monthly
-    ]
-    return payload
-
-
-def _confidence_note(sizing: SizingResult) -> str:
-    """Say plainly what the numbers are worth."""
-    if sizing.measured_load:
-        return (
-            "Demand came from metered interval data, so the load shape is known "
-            "rather than assumed. The remaining uncertainty is weather variability "
-            "and the accuracy of the generation model."
-        )
-    if sizing.band is None or sizing.band_pv_only is None:
-        return "Demand was synthesised from billing data."
-    return (
-        "Demand was synthesised from billing data, so when the household uses "
-        "electricity is an assumption, not a measurement. Varying that "
-        f"assumption moves the battery result by {sizing.band.spread_pct:.0f}% "
-        f"but the no-battery result by {sizing.band_pv_only.spread_pct:.0f}% -- "
-        "a battery absorbs the mismatch it governs. Upload half-hourly meter "
-        "data to remove the assumption entirely."
-    )
-
-
-def household_options() -> list[dict]:
-    """Describe the load archetypes, for the UI to offer."""
-    from .load import DAYTIME_WINDOW, archetype_daytime_fraction
-
-    labels = {
-        "nine_to_five": "Out at work during the day",
-        "home_all_day": "Someone home all day",
-        "working_from_home": "Working from home",
-        "flat": "Flat (diagnostic baseline)",
-    }
-    start, end = DAYTIME_WINDOW
-    return [
-        {
-            "value": name,
-            "label": labels.get(name, name.replace("_", " ").title()),
-            "daytime_fraction": round(archetype_daytime_fraction(name), 4),
-            "daytime_window": f"{start:02d}:00-{end:02d}:00",
-        }
-        for name in ARCHETYPES
-    ]
-
-
-def default_loss_breakdown() -> dict[str, float]:
-    """The default itemised loss stack, as percentages, plus its combined total."""
-    items = {name: round(value * 100, 2) for name, value in DEFAULT_LOSSES.items()}
-    items["combined_total"] = round(combine_losses(DEFAULT_LOSSES) * 100, 2)
-    return items
+# Re-exported so existing importers of solarest.service keep working; the
+# definitions live in solarest.presenter.
+__all__ = [
+    "BatteryRequest",
+    "ConsumptionRequest",
+    "EstimateOutcome",
+    "EstimateRequest",
+    "HouseholdRequest",
+    "SizingOutcome",
+    "SizingRequest",
+    "SystemRequest",
+    "default_loss_breakdown",
+    "household_options",
+    "outcome_to_dict",
+    "run_estimate",
+    "run_sizing",
+    "sizing_to_dict",
+]

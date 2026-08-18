@@ -21,3 +21,6 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# Static site build output
+/site/

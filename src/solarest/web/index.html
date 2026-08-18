@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Solar Power Estimation</title>
 <meta name="description" content="Estimate how much electricity a solar PV system would generate over a year at any location, using ECMWF ERA5 reanalysis weather.">
-<link rel="stylesheet" href="/static/styles.css">
+<link rel="stylesheet" href="./styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>☀️</text></svg>">
 </head>
 <body>
@@ -187,6 +187,7 @@
         Because it runs ten separate years, you get the spread between a good year
         and a poor one — not a single number pretending to be certain.
       </p>
+      <p id="boot-status" class="banner" hidden></p>
     </section>
 
     <div id="output" hidden>
@@ -366,6 +367,6 @@
   </p>
 </footer>
 
-<script type="module" src="/static/app.js"></script>
+<script type="module" src="./app.js"></script>
 </body>
 </html>

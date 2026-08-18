@@ -208,3 +208,9 @@ if WEB_ROOT.is_dir():
         return FileResponse(WEB_ROOT / "index.html")
 
     app.mount("/static", StaticFiles(directory=WEB_ROOT), name="static")
+
+    # Also serve the assets at the root. The page references them relatively
+    # ("./app.js") so that the identical file works when hosted as a static
+    # site under a subpath, where "/static/..." would resolve off the site.
+    # Registered last, so every API route above still wins.
+    app.mount("/", StaticFiles(directory=WEB_ROOT), name="root")
