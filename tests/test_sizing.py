@@ -218,3 +218,94 @@ def _blank_typical_year():
         air_temp_c=zeros,
         annual_kwh=0.0,
     )
+
+
+# ------------------------------------------------------- the typical day
+
+
+def test_the_diurnal_balance_has_a_day_per_month_and_one_for_the_year(
+    typical_year, nine_to_five
+):
+    diurnal = size_for_household(typical_year, nine_to_five).diurnal
+    expected = {"generation", "direct", "from_battery", "to_battery", "import", "export"}
+
+    assert set(diurnal.by_month) == expected
+    assert set(diurnal.by_year) == expected
+    for grid in diurnal.by_month.values():
+        assert grid.shape == (12, 24)
+    for values in diurnal.by_year.values():
+        assert values.shape == (24,)
+
+
+def test_every_hour_of_the_typical_day_balances(typical_year, nine_to_five):
+    """The two identities that make the chart trustworthy.
+
+    Generation is fully accounted for, and demand is fully met -- in every
+    month and every hour, not just in the annual totals.
+    """
+    diurnal = size_for_household(typical_year, nine_to_five).diurnal
+
+    for source in (diurnal.by_month, diurnal.by_year):
+        generation = source["generation"]
+        assert np.allclose(
+            generation, source["direct"] + source["to_battery"] + source["export"]
+        )
+        demand = source["direct"] + source["from_battery"] + source["import"]
+        assert np.all(demand >= -1e-9)
+
+
+def test_the_diurnal_means_add_back_up_to_the_annual_totals(typical_year, nine_to_five):
+    result = size_for_household(typical_year, nine_to_five)
+    by_year = result.diurnal.by_year
+
+    # Each entry is a mean over 365 days, so the day sums to the year over 365.
+    assert float(by_year["generation"].sum()) * 365 == pytest.approx(
+        result.result.generation_kwh, rel=1e-9
+    )
+    assert float(by_year["import"].sum()) * 365 == pytest.approx(
+        result.result.total_import_kwh, rel=1e-9
+    )
+
+
+def test_the_sun_only_shines_in_the_middle_of_the_day(typical_year, nine_to_five):
+    generation = size_for_household(typical_year, nine_to_five).diurnal.by_year["generation"]
+    assert generation[0] == pytest.approx(0.0, abs=1e-9)
+    assert generation[23] == pytest.approx(0.0, abs=1e-9)
+    assert 10 <= int(np.argmax(generation)) <= 14
+
+
+def test_the_battery_charges_by_day_and_discharges_by_night(typical_year, nine_to_five):
+    """The shape the chart exists to show."""
+    diurnal = size_for_household(
+        typical_year, nine_to_five, BatterySpec(usable_capacity_kwh=8.0)
+    ).diurnal.by_year
+
+    daylight = slice(9, 16)
+    evening = slice(18, 23)
+    assert diurnal["to_battery"][daylight].sum() > diurnal["to_battery"][evening].sum()
+    assert diurnal["from_battery"][evening].sum() > diurnal["from_battery"][daylight].sum()
+
+
+def test_summer_days_buy_less_from_the_grid_than_winter_days(typical_year, nine_to_five):
+    by_month = size_for_household(typical_year, nine_to_five).diurnal.by_month
+    assert by_month["import"][5].sum() < by_month["import"][11].sum()
+
+
+def test_a_bigger_battery_shifts_export_into_storage(typical_year, nine_to_five):
+    small = size_for_household(
+        typical_year, nine_to_five, BatterySpec(usable_capacity_kwh=1.0)
+    ).diurnal.by_year
+    large = size_for_household(
+        typical_year, nine_to_five, BatterySpec(usable_capacity_kwh=12.0)
+    ).diurnal.by_year
+
+    assert large["to_battery"].sum() > small["to_battery"].sum()
+    assert large["export"].sum() < small["export"].sum()
+
+
+def test_with_no_battery_the_day_has_no_storage_flows(typical_year, nine_to_five):
+    diurnal = size_for_household(
+        typical_year, nine_to_five, BatterySpec(usable_capacity_kwh=0.0)
+    ).diurnal.by_year
+    assert diurnal["to_battery"].sum() == pytest.approx(0.0)
+    assert diurnal["from_battery"].sum() == pytest.approx(0.0)

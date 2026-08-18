@@ -440,6 +440,16 @@ def sizing_to_dict(outcome: SizingOutcome, include_hourly: bool = False) -> dict
         for entry in sizing.curve
     ]
     payload["suggested_capacity_kwh"] = sizing.suggested_capacity_kwh
+    payload["diurnal_balance"] = {
+        "by_month": {
+            name: [[round(float(v), 4) for v in row] for row in grid]
+            for name, grid in sizing.diurnal.by_month.items()
+        },
+        "by_year": {
+            name: [round(float(v), 4) for v in values]
+            for name, values in sizing.diurnal.by_year.items()
+        },
+    }
     payload["monthly_balance"] = [
         {
             "month": m.month,

@@ -2,7 +2,7 @@
  * Page controller: reads the form, calls the API, renders the results.
  */
 
-import { barChart, heatmap, stackedBar, legend, table } from "./charts.js";
+import { barChart, curveChart, dayProfile, heatmap, stackedBar, legend, table } from "./charts.js";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July",
@@ -19,7 +19,10 @@ const number = (value, digits = 0) =>
   value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 
 /** State that outlives a single render. */
-const state = { lastRequest: null, lastResult: null, searchTimer: null };
+const state = {
+  lastRequest: null, lastResult: null, searchTimer: null,
+  archetypes: [], meterReadings: null, dayMonth: "year",
+};
 
 /* ------------------------------------------------------------- helpers */
 
@@ -48,6 +51,13 @@ async function loadOptions() {
       );
     }
     $("module").value = "premium";
+    state.archetypes = data.household_archetypes || [];
+    for (const item of state.archetypes) {
+      $("archetype").add(new Option(item.label, item.value));
+    }
+    $("archetype").value = "nine_to_five";
+    applyArchetypeDefault();
+
     $("years").max = String(data.max_years);
     $("years").value = String(data.default_years);
     $("years-value").textContent = String(data.default_years);
@@ -134,9 +144,42 @@ function buildRequest(includeHourly) {
   };
 }
 
+/** The demand and battery half of a sizing request. */
+function buildSizingRequest(includeHourly) {
+  const mode = document.querySelector('input[name="demand-mode"]:checked').value;
+  const consumption = { household: { archetype: $("archetype").value } };
+
+  if (mode === "meter") {
+    consumption.hourly_kwh = state.meterReadings;
+  } else if (mode === "monthly") {
+    consumption.monthly_kwh = monthInputs().map((input) => Number(input.value) || 0);
+  } else {
+    consumption.annual_kwh = Number($("annual-kwh").value);
+  }
+  // Only meaningful for a synthesised profile; harmless but noisy otherwise.
+  if (mode !== "meter") {
+    consumption.household.daytime_fraction = Number($("daytime").value) / 100;
+  }
+
+  return {
+    ...buildRequest(includeHourly),
+    consumption,
+    battery: { usable_capacity_kwh: Number($("battery-kwh").value) },
+  };
+}
+
 async function runEstimate(event) {
   event.preventDefault();
-  const request = buildRequest(false);
+  const sizing = $("enable-sizing").checked;
+
+  let request;
+  try {
+    request = sizing ? buildSizingRequest(false) : buildRequest(false);
+  } catch (error) {
+    $("form-error").textContent = String(error.message || error);
+    $("form-error").hidden = false;
+    return;
+  }
   state.lastRequest = request;
 
   $("form-error").hidden = true;
@@ -149,7 +192,7 @@ async function runEstimate(event) {
     : `Fetching ${request.years} years of hourly weather…`;
 
   try {
-    const response = await fetch("/api/estimate", {
+    const response = await fetch(sizing ? "/api/sizing" : "/api/estimate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
@@ -180,6 +223,7 @@ function render(data) {
   renderLosses(data);
   renderAnnual(data);
   renderOrientation(data);
+  renderSizing(data);
 }
 
 function renderHeadline(data) {
@@ -377,6 +421,396 @@ function renderOrientation(data) {
   };
 }
 
+/* -------------------------------------------------------- battery sizing */
+
+/** Read a semantic flow colour off the document. */
+const flow = (name) =>
+  getComputedStyle(document.body).getPropertyValue(`--flow-${name}`).trim();
+
+/** The twelve monthly consumption inputs, in calendar order. */
+const monthInputs = () => Array.from(document.querySelectorAll("#month-inputs input"));
+
+/** Move the daytime slider to whatever the chosen archetype implies. */
+function applyArchetypeDefault() {
+  const chosen = state.archetypes.find((a) => a.value === $("archetype").value);
+  if (!chosen) return;
+  const percent = Math.round(chosen.daytime_fraction * 100);
+  $("daytime").value = String(percent);
+  $("daytime-value").textContent = `${percent}%`;
+}
+
+/** Build the twelve month boxes, pre-filled with a plausible split. */
+function buildMonthInputs() {
+  const seasonal = [1.24, 1.14, 1.05, 0.94, 0.85, 0.79, 0.79, 0.82, 0.88, 1.00, 1.13, 1.25];
+  const total = seasonal.reduce((a, b) => a + b, 0);
+  $("month-inputs").replaceChildren(
+    ...MONTHS.map((label, index) => {
+      const wrapper = document.createElement("div");
+      const id = `month-kwh-${index}`;
+      wrapper.innerHTML =
+        `<label for="${id}">${label}</label>` +
+        `<input type="number" id="${id}" min="0" max="20000" step="1" ` +
+        `value="${Math.round((3500 * seasonal[index]) / total)}">`;
+      return wrapper;
+    })
+  );
+}
+
+/**
+ * Parse a smart-meter export in the browser.
+ *
+ * Deliberately forgiving, because supplier exports are: blank lines, comments
+ * and a header row are skipped, and where a row has several fields the last
+ * numeric one is taken — which handles `timestamp,kwh` without being told
+ * which column is which. Mirrors the CLI's reader.
+ */
+function parseMeterCsv(text) {
+  const readings = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/^﻿/, "");
+    if (!line || line.startsWith("#")) continue;
+    for (const field of line.split(",").reverse()) {
+      const value = Number(field.trim());
+      if (field.trim() !== "" && Number.isFinite(value)) {
+        readings.push(value);
+        break;
+      }
+    }
+  }
+  return readings;
+}
+
+async function loadMeterFile(file) {
+  const status = $("meter-status");
+  if (!file) return;
+  try {
+    const readings = parseMeterCsv(await file.text());
+    const perHour = readings.length / 8760;
+    const known = { 1: "hourly", 2: "half-hourly", 4: "quarter-hourly", 60: "minute" };
+    const leap = readings.length % (366 * 24) === 0;
+
+    if (!readings.length) throw new Error("no numeric readings found");
+    if (readings.length % 8760 !== 0 && !leap) {
+      throw new Error(
+        `${readings.length.toLocaleString()} readings is not a whole year at a ` +
+        `fixed interval — 8,760 (hourly) or 17,520 (half-hourly) are the usual shapes`
+      );
+    }
+    state.meterReadings = readings;
+    const total = readings.reduce((a, b) => a + b, 0);
+    status.textContent =
+      `${readings.length.toLocaleString()} readings` +
+      `${known[perHour] ? ` (${known[perHour]})` : ""}, ` +
+      `${number(total)} kWh over the year. No assumptions needed.`;
+    status.classList.remove("error");
+  } catch (error) {
+    state.meterReadings = null;
+    status.textContent = `Could not read that file: ${error.message}`;
+    status.classList.add("error");
+  }
+}
+
+/** Which demand pane is showing, and whether the household knobs matter. */
+function applyDemandMode() {
+  const mode = document.querySelector('input[name="demand-mode"]:checked').value;
+  $("demand-annual").hidden = mode !== "annual";
+  $("demand-monthly").hidden = mode !== "monthly";
+  $("demand-meter").hidden = mode !== "meter";
+  // Metered data already says when electricity is used; nothing to assume.
+  $("household-fields").hidden = mode === "meter";
+}
+
+/** Pull one day's worth of every balance series out of the payload. */
+function daySeries(data, selection) {
+  const source = data.diurnal_balance;
+  const pick = (name) =>
+    selection === "year" ? source.by_year[name] : source.by_month[name][selection];
+  return {
+    generation: pick("generation"),
+    direct: pick("direct"),
+    fromBattery: pick("from_battery"),
+    toBattery: pick("to_battery"),
+    imported: pick("import"),
+    exported: pick("export"),
+  };
+}
+
+function renderSizing(data) {
+  const panel = $("sizing-output");
+  if (!data.balance) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  renderSizingHeadline(data);
+  renderMonthPicker(data);
+  renderDay(data);
+  renderCurve(data);
+  renderSizingMonthly(data);
+  renderConfidence(data);
+}
+
+function renderSizingHeadline(data) {
+  const balance = data.balance;
+  const battery = data.battery;
+
+  $("sizing-hero").textContent = number(balance.avoided_import_kwh);
+
+  const band = data.confidence.band;
+  $("sizing-range").textContent = band
+    ? `Between ${number(band.low_kwh)} and ${number(band.high_kwh)} kWh, depending on ` +
+      `when the household actually uses electricity`
+    : `Straight from your meter data — no assumption about when electricity is used`;
+
+  const stats = [
+    ["Self-sufficiency", `${balance.self_sufficiency_pct.toFixed(0)}%`,
+      `of ${number(balance.load_kwh)} kWh used`],
+    ["The battery's share", `${number(balance.battery_contribution_kwh)}`,
+      `kWh beyond panels alone (${number(balance.pv_only_avoided_import_kwh)})`],
+    ["Still bought", `${number(balance.import_kwh)}`, "kWh from the grid"],
+    ["Exported", `${number(balance.export_kwh)}`, "kWh sent back"],
+    ["Self-consumption", `${balance.self_consumption_pct.toFixed(0)}%`,
+      `of ${number(balance.generation_kwh)} kWh generated`],
+    ["Battery cycles", balance.equivalent_full_cycles.toFixed(0),
+      `full cycles a year, ${battery.usable_capacity_kwh} kWh usable`],
+  ];
+  $("sizing-stats").replaceChildren(
+    ...stats.map(([label, value, note]) => {
+      const wrapper = document.createElement("div");
+      wrapper.className = "stat";
+      wrapper.innerHTML = `<dt>${label}</dt><dd>${value}<span class="stat-note">${note}</span></dd>`;
+      return wrapper;
+    })
+  );
+
+  $("sizing-provenance").textContent =
+    `${number(balance.load_kwh)} kWh a year against a ${data.system.dc_capacity_kw} kWp array ` +
+    `making ${number(balance.generation_kwh)} kWh, through a ${battery.usable_capacity_kwh} kWh ` +
+    `battery charging and discharging at up to ${battery.max_charge_kw} kW with ` +
+    `${(battery.round_trip_efficiency * 100).toFixed(0)}% round-trip efficiency. ` +
+    `${data.consumption.source}.`;
+}
+
+function renderMonthPicker(data) {
+  const host = $("day-months");
+  const options = [["year", "Year"], ...MONTHS.map((m, i) => [i, m])];
+
+  host.replaceChildren(
+    ...options.map(([value, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.setAttribute("aria-pressed", String(state.dayMonth === value));
+      button.addEventListener("click", () => {
+        state.dayMonth = value;
+        renderMonthPicker(data);
+        renderDay(data);
+      });
+      return button;
+    })
+  );
+}
+
+/**
+ * One sentence on what this particular day does.
+ *
+ * The bands get thin in midsummer, when a household's demand is a fraction of
+ * what the roof makes, so the reading is spelled out rather than left to the
+ * pixels.
+ */
+function dayInsight(day) {
+  const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+  const hours = (series) => series.filter((v) => v > 0.01).length;
+  const peakHour = (series) => series.indexOf(Math.max(...series));
+  const total = (series) => series.reduce((a, b) => a + b, 0);
+
+  const boughtHours = hours(day.imported);
+  const batteryHours = hours(day.fromBattery);
+  const batteryNote = batteryHours
+    ? ` The battery is supplying the house for ${batteryHours} of the 24, ` +
+      `hardest around ${hh(peakHour(day.fromBattery))}.`
+    : "";
+
+  if (!boughtHours) {
+    return `On this day the grid is never touched.${batteryNote}`;
+  }
+  const demand = total(day.direct) + total(day.fromBattery) + total(day.imported);
+  const share = total(day.imported) / Math.max(1e-9, demand);
+
+  // Grid hours usually wrap around midnight, so a first-to-last span would
+  // read as the whole day. The count and the worst hour say more.
+  return (
+    `Grid electricity is needed for ${boughtHours} ${boughtHours === 1 ? "hour" : "hours"} ` +
+    `of the 24, peaking around ${hh(peakHour(day.imported))}, and covers ` +
+    `${(share * 100).toFixed(0)}% of the day's use.${batteryNote}`
+  );
+}
+
+function renderDay(data) {
+  const day = daySeries(data, state.dayMonth);
+  const when = state.dayMonth === "year"
+    ? "averaged over the whole year"
+    : `an average ${MONTH_NAMES[state.dayMonth]} day`;
+
+  const supply = [
+    { label: "Sunlight, used as it arrives", color: flow("solar"), values: day.direct },
+    { label: "From the battery", color: flow("battery"), values: day.fromBattery },
+    { label: "Bought from the grid", color: flow("grid"), values: day.imported },
+  ];
+  const surplus = [
+    { label: "Stored in the battery", color: flow("charge"), values: day.toBattery },
+    { label: "Exported to the grid", color: flow("export"), values: day.exported },
+  ];
+
+  const demandAt = (h) => day.direct[h] + day.fromBattery[h] + day.imported[h];
+  const total = (series) => series.reduce((a, b) => a + b, 0);
+
+  $("day-sub").textContent =
+    `Where each kilowatt came from and went, hour by hour, ${when}, in local ` +
+    `standard time. Above the line is demand being met; below it is generation ` +
+    `with nowhere else to go. The dashed line is total output. ` +
+    dayInsight(day);
+
+  dayProfile($("day-chart"), {
+    supply,
+    surplus,
+    generation: day.generation,
+    unit: "kW",
+    describe: (h) => {
+      const hh = (n) => String(n % 24).padStart(2, "0");
+      const row = (label, value, colour) =>
+        value > 0.005
+          ? `<br><span class="tip-swatch" style="background:${colour}"></span>${label} ${value.toFixed(2)} kW`
+          : "";
+      return (
+        `<strong>${hh(h)}:00–${hh(h + 1)}:00</strong>` +
+        `<br><span class="tip-muted">using ${demandAt(h).toFixed(2)} kW, ` +
+        `generating ${day.generation[h].toFixed(2)} kW</span>` +
+        row("Sunlight direct", day.direct[h], flow("solar")) +
+        row("From battery", day.fromBattery[h], flow("battery")) +
+        row("From grid", day.imported[h], flow("grid")) +
+        row("Into battery", day.toBattery[h], flow("charge")) +
+        row("Exported", day.exported[h], flow("export"))
+      );
+    },
+  });
+
+  legend($("day-legend"), [
+    ...supply.map((s) => ({ label: s.label, color: s.color, value: `${total(s.values).toFixed(1)} kWh` })),
+    ...surplus.map((s) => ({ label: s.label, color: s.color, value: `${total(s.values).toFixed(1)} kWh` })),
+  ]);
+
+  table(
+    $("day-table"),
+    ["Hour", "Generated kW", "Direct kW", "From battery kW", "From grid kW", "Into battery kW", "Exported kW"],
+    Array.from({ length: 24 }, (_, h) => [
+      `${String(h).padStart(2, "0")}:00`,
+      day.generation[h].toFixed(2), day.direct[h].toFixed(2), day.fromBattery[h].toFixed(2),
+      day.imported[h].toFixed(2), day.toBattery[h].toFixed(2), day.exported[h].toFixed(2),
+    ])
+  );
+}
+
+function renderCurve(data) {
+  const curve = data.sizing_curve;
+  const suggested = data.suggested_capacity_kwh;
+  const chosen = data.battery.usable_capacity_kwh;
+  const atSuggested = curve.find((row) => row.capacity_kwh === suggested);
+
+  $("curve-sub").textContent = suggested > 0
+    ? `Each extra kilowatt-hour of storage buys less than the one before it. Past ` +
+      `about ${suggested} kWh the curve flattens — that capacity already reaches ` +
+      `morning with charge to spare, so a bigger one would mostly sit idle` +
+      (atSuggested ? `, at ${atSuggested.self_sufficiency_pct.toFixed(0)}% self-sufficiency.` : ".")
+    : `Generation already lands when this household needs it, so storage has ` +
+      `little to do. A battery is hard to justify here on self-consumption alone.`;
+
+  curveChart($("curve-chart"), {
+    x: curve.map((row) => row.capacity_kwh),
+    y: curve.map((row) => row.avoided_import_kwh),
+    markX: suggested,
+    xLabel: "Usable battery capacity (kWh)",
+    unit: "kWh",
+    format: (v) => number(v),
+    describe: (i) => {
+      const row = curve[i];
+      return (
+        `<strong>${row.capacity_kwh} kWh battery</strong>` +
+        `<br>${number(row.avoided_import_kwh)} kWh not bought` +
+        `<br><span class="tip-muted">${row.self_sufficiency_pct.toFixed(0)}% self-sufficient` +
+        (i > 0 ? ` · this step buys ${number(row.marginal_kwh_per_kwh)} kWh per extra kWh` : "") +
+        `</span>`
+      );
+    },
+  });
+
+  table(
+    $("curve-table"),
+    ["Battery kWh", "Not bought kWh", "Self-sufficiency", "Self-consumption", "Exported kWh", "Cycles/yr", "Per extra kWh"],
+    curve.map((row) => [
+      row.capacity_kwh === chosen ? `${row.capacity_kwh} (yours)` : row.capacity_kwh,
+      number(row.avoided_import_kwh),
+      `${row.self_sufficiency_pct.toFixed(0)}%`,
+      `${row.self_consumption_pct.toFixed(0)}%`,
+      number(row.export_kwh),
+      row.equivalent_full_cycles.toFixed(0),
+      number(row.marginal_kwh_per_kwh),
+    ])
+  );
+}
+
+function renderSizingMonthly(data) {
+  const months = data.monthly_balance;
+  const best = months.reduce((a, b) => (b.self_sufficiency_pct > a.self_sufficiency_pct ? b : a));
+  const worst = months.reduce((a, b) => (b.self_sufficiency_pct < a.self_sufficiency_pct ? b : a));
+
+  $("sizing-monthly-sub").textContent =
+    `${MONTH_NAMES[best.month - 1]} runs at ${best.self_sufficiency_pct.toFixed(0)}% off ` +
+    `your own roof; ${MONTH_NAMES[worst.month - 1]} manages ` +
+    `${worst.self_sufficiency_pct.toFixed(0)}%. Winter is when the grid earns its keep, ` +
+    `and no domestic battery bridges that gap — the shortfall is seasonal, not daily.`;
+
+  barChart($("sizing-monthly-chart"), {
+    labels: MONTHS,
+    values: months.map((m) => m.self_sufficiency_pct),
+    unit: "%",
+    format: (v) => `${v.toFixed(0)}`,
+  });
+
+  table(
+    $("sizing-monthly-table"),
+    ["Month", "Used kWh", "Generated kWh", "Direct kWh", "From battery kWh", "Bought kWh", "Exported kWh", "Self-sufficiency"],
+    months.map((m) => [
+      MONTH_NAMES[m.month - 1],
+      number(m.load_kwh), number(m.generation_kwh), number(m.direct_kwh),
+      number(m.from_battery_kwh), number(m.import_kwh), number(m.export_kwh),
+      `${m.self_sufficiency_pct.toFixed(0)}%`,
+    ])
+  );
+}
+
+function renderConfidence(data) {
+  $("confidence-note").textContent = data.confidence.note;
+
+  const rows = [
+    ["With your battery", data.confidence.band],
+    ["Panels alone, no battery", data.confidence.band_pv_only],
+  ].filter(([, band]) => band);
+
+  $("confidence-bands").replaceChildren(
+    ...rows.map(([label, band]) => {
+      const row = document.createElement("div");
+      row.className = "band-row";
+      row.innerHTML =
+        `<span class="band-label">${label}</span>` +
+        `<span><strong>${number(band.low_kwh)}–${number(band.high_kwh)}</strong> kWh ` +
+        `<span class="band-spread">(±${(band.spread_pct / 2).toFixed(0)}%)</span></span>`;
+      return row;
+    })
+  );
+}
+
 /* ------------------------------------------------------------ downloads */
 
 async function downloadCsv() {
@@ -456,6 +890,31 @@ function init() {
       button.textContent = target.hidden ? "Show table" : "Hide table";
     });
   }
+
+  // ---- battery sizing controls
+  buildMonthInputs();
+
+  $("enable-sizing").addEventListener("change", (event) => {
+    $("sizing-fields").hidden = !event.target.checked;
+    $("run").textContent = event.target.checked
+      ? "Estimate generation & savings"
+      : "Estimate a year";
+  });
+
+  for (const radio of document.querySelectorAll('input[name="demand-mode"]')) {
+    radio.addEventListener("change", applyDemandMode);
+  }
+  applyDemandMode();
+
+  $("archetype").addEventListener("change", applyArchetypeDefault);
+  $("daytime").addEventListener("input", (e) => {
+    $("daytime-value").textContent = `${e.target.value}%`;
+  });
+  $("battery-kwh").addEventListener("input", (e) => {
+    const value = Number(e.target.value);
+    $("battery-value").textContent = value > 0 ? `${value.toFixed(1)} kWh` : "No battery";
+  });
+  $("meter-file").addEventListener("change", (e) => loadMeterFile(e.target.files[0]));
 
   $("download-csv").addEventListener("click", downloadCsv);
 

@@ -43,6 +43,24 @@ DEFAULT_SWEEP_KWH: tuple[float, ...] = (
 
 
 @dataclass(frozen=True)
+class DiurnalBalance:
+    """Average power by hour of day, for a typical day in each month.
+
+    This is the shape a household actually recognises: sun climbing through
+    the morning, the battery filling, then carrying the evening peak until it
+    runs out and the grid takes over. Annual totals cannot show that, and it is
+    the picture that makes a battery make sense or not.
+
+    Attributes:
+        by_month: Series name to a 12x24 grid of mean kW, January first.
+        by_year: Series name to 24 mean kW values across the whole year.
+    """
+
+    by_month: dict[str, np.ndarray]
+    by_year: dict[str, np.ndarray]
+
+
+@dataclass(frozen=True)
 class MonthlyBalance:
     """One calendar month of the energy balance, kWh."""
 
@@ -100,6 +118,7 @@ class SizingResult:
         battery: The battery modelled for the headline figures.
         result: The full hourly dispatch.
         monthly: The balance month by month.
+        diurnal: The balance across a typical day, by month.
         curve: Avoided import against battery capacity.
         suggested_capacity_kwh: Where the curve stops paying its way.
         band: Confidence band on the headline, present only for synthesised
@@ -115,6 +134,7 @@ class SizingResult:
     battery: BatterySpec
     result: DispatchResult
     monthly: list[MonthlyBalance]
+    diurnal: DiurnalBalance
     curve: list[SizeResult]
     suggested_capacity_kwh: float
     band: ConfidenceBand | None
@@ -186,6 +206,7 @@ def size_for_household(
         battery=battery,
         result=outcome,
         monthly=_monthly_balance(generation, load.kwh, outcome),
+        diurnal=_diurnal_balance(generation, outcome),
         curve=curve,
         suggested_capacity_kwh=suggest_capacity(curve),
         band=band,
@@ -227,6 +248,36 @@ def _confidence_band(
         low_daytime_fraction=low.daytime_fraction,
         high_daytime_fraction=high.daytime_fraction,
     )
+
+
+def _diurnal_balance(
+    generation: np.ndarray, outcome: DispatchResult
+) -> DiurnalBalance:
+    """Average each balance series over hour of day, per month and per year."""
+    month = _month_index(REFERENCE_YEAR)
+    hour = np.arange(generation.size) % 24
+
+    series = {
+        "generation": generation,
+        "direct": outcome.direct_kwh,
+        "from_battery": outcome.discharge_kwh,
+        "to_battery": outcome.charge_kwh,
+        "import": outcome.import_kwh,
+        "export": outcome.export_kwh,
+    }
+
+    month_bucket = month * 24 + hour
+    month_counts = np.bincount(month_bucket, minlength=12 * 24)
+    year_counts = np.bincount(hour, minlength=24)
+
+    by_month, by_year = {}, {}
+    for name, values in series.items():
+        by_month[name] = (
+            np.bincount(month_bucket, weights=values, minlength=12 * 24) / month_counts
+        ).reshape(12, 24)
+        by_year[name] = np.bincount(hour, weights=values, minlength=24) / year_counts
+
+    return DiurnalBalance(by_month=by_month, by_year=by_year)
 
 
 def _monthly_balance(

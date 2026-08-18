@@ -104,6 +104,64 @@
       </details>
     </section>
 
+    <section class="field-group">
+      <h2>Battery</h2>
+
+      <label class="checkbox">
+        <input type="checkbox" id="enable-sizing" name="enable-sizing">
+        <span>Work out what a battery would save</span>
+      </label>
+      <p class="help tight">Needs to know what the household uses, and roughly when.</p>
+
+      <div id="sizing-fields" hidden>
+
+        <label id="consumption-legend">How much electricity do you use?</label>
+        <div class="segmented" role="radiogroup" aria-labelledby="consumption-legend">
+          <label><input type="radio" name="demand-mode" value="annual" checked><span>A year</span></label>
+          <label><input type="radio" name="demand-mode" value="monthly"><span>By month</span></label>
+          <label><input type="radio" name="demand-mode" value="meter"><span>Meter data</span></label>
+        </div>
+
+        <div id="demand-annual" class="demand-pane">
+          <label for="annual-kwh">Yearly use <span class="unit">kWh</span></label>
+          <input type="number" id="annual-kwh" step="10" min="100" max="100000" value="3500">
+          <p class="help tight">A typical UK home uses 2,700&nbsp;kWh; 3,500–4,500 with electric heating or an EV.</p>
+        </div>
+
+        <div id="demand-monthly" class="demand-pane" hidden>
+          <label>Each month&rsquo;s use <span class="unit">kWh</span></label>
+          <div class="month-grid" id="month-inputs"></div>
+          <p class="help tight">Straight off the bills. Better than a yearly total, because winter is when it matters.</p>
+        </div>
+
+        <div id="demand-meter" class="demand-pane" hidden>
+          <label for="meter-file">Smart-meter export <span class="unit">CSV</span></label>
+          <input type="file" id="meter-file" accept=".csv,.txt,text/csv,text/plain">
+          <p class="help tight" id="meter-status">
+            A year of readings at any regular interval. Removes the guesswork entirely.
+          </p>
+        </div>
+
+        <div id="household-fields">
+          <label for="archetype">When are you usually in?</label>
+          <select id="archetype"></select>
+
+          <label for="daytime">
+            Used between 09:00 and 17:00 <span class="unit" id="daytime-value">25%</span>
+          </label>
+          <input type="range" id="daytime" min="10" max="70" step="1" value="25">
+          <p class="help tight">
+            The single biggest unknown when working from bills. Nudge it if neither
+            pattern above fits.
+          </p>
+        </div>
+
+        <label for="battery-kwh">Battery size <span class="unit" id="battery-value">5.0 kWh</span></label>
+        <input type="range" id="battery-kwh" min="0" max="20" step="0.5" value="5">
+        <p class="help tight">Usable capacity, which is normally a little under the nameplate figure.</p>
+      </div>
+    </section>
+
     <button type="submit" id="run" class="primary">Estimate a year</button>
     <p id="form-error" class="error" role="alert" hidden></p>
   </form>
@@ -216,6 +274,70 @@
         <div class="chart-host" id="orientation-chart"></div>
         <div class="scale-note"><span>less output</span><div class="ramp-strip" aria-hidden="true"></div><span>more output</span></div>
       </section>
+
+      <!-- ================================================ battery sizing -->
+      <div id="sizing-output" hidden>
+
+        <section class="panel">
+          <div class="headline">
+            <div class="hero">
+              <span class="hero-label">Not bought from the grid</span>
+              <span class="hero-number" id="sizing-hero">—</span>
+              <span class="hero-unit">kWh per year</span>
+              <span class="hero-range" id="sizing-range"></span>
+            </div>
+            <dl class="stat-grid" id="sizing-stats"></dl>
+          </div>
+          <p class="help" id="sizing-provenance"></p>
+        </section>
+
+        <!-- the typical day -->
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>A typical day</h2>
+              <p class="help" id="day-sub"></p>
+            </div>
+            <button type="button" class="ghost small" data-toggle="day-table">Show table</button>
+          </div>
+          <div class="month-picker" id="day-months" role="group" aria-label="Month to show"></div>
+          <div class="chart-host" id="day-chart"></div>
+          <div class="legend" id="day-legend"></div>
+          <div class="table-host" id="day-table" hidden></div>
+        </section>
+
+        <!-- how big -->
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>How big a battery?</h2>
+              <p class="help" id="curve-sub"></p>
+            </div>
+            <button type="button" class="ghost small" data-toggle="curve-table">Show table</button>
+          </div>
+          <div class="chart-host" id="curve-chart"></div>
+          <div class="table-host" id="curve-table" hidden></div>
+        </section>
+
+        <!-- month by month -->
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Self-sufficiency through the year</h2>
+              <p class="help" id="sizing-monthly-sub"></p>
+            </div>
+            <button type="button" class="ghost small" data-toggle="sizing-monthly-table">Show table</button>
+          </div>
+          <div class="chart-host" id="sizing-monthly-chart"></div>
+          <div class="table-host" id="sizing-monthly-table" hidden></div>
+        </section>
+
+        <section class="panel">
+          <h2>What this answer is worth</h2>
+          <p id="confidence-note"></p>
+          <div id="confidence-bands" class="confidence-bands"></div>
+        </section>
+      </div>
 
       <!-- export -->
       <section class="panel">

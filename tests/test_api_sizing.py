@@ -211,3 +211,47 @@ def test_the_note_explains_what_a_bills_based_answer_is_worth():
 
     assert confidence["band"]["spread_pct"] < confidence["band_pv_only"]["spread_pct"]
     assert "assumption" in confidence["note"]
+
+
+# --------------------------------------------------- the typical-day payload
+
+
+def test_the_payload_carries_a_day_profile_for_the_chart(client):
+    diurnal = client.post("/api/sizing", json=sizing_body()).json()["diurnal_balance"]
+    expected = {"generation", "direct", "from_battery", "to_battery", "import", "export"}
+
+    assert set(diurnal["by_month"]) == expected
+    assert set(diurnal["by_year"]) == expected
+    for grid in diurnal["by_month"].values():
+        assert len(grid) == 12 and all(len(row) == 24 for row in grid)
+    for row in diurnal["by_year"].values():
+        assert len(row) == 24
+
+
+def test_the_serialised_day_still_balances(client):
+    """Rounding for the wire must not break the identity the chart draws."""
+    diurnal = client.post("/api/sizing", json=sizing_body()).json()["diurnal_balance"]
+    year = diurnal["by_year"]
+
+    for hour in range(24):
+        assert year["generation"][hour] == pytest.approx(
+            year["direct"][hour] + year["to_battery"][hour] + year["export"][hour],
+            abs=1e-3,
+        )
+
+
+def test_the_day_profile_shows_the_battery_working(client):
+    year = client.post("/api/sizing", json=sizing_body()).json()["diurnal_balance"]["by_year"]
+    charging = sum(year["to_battery"][9:16])
+    discharging = sum(year["from_battery"][18:23])
+
+    assert charging > sum(year["to_battery"][18:23])
+    assert discharging > sum(year["from_battery"][9:16])
+
+
+def test_no_battery_leaves_the_day_profile_free_of_storage(client):
+    body = sizing_body(battery={"usable_capacity_kwh": 0.0})
+    year = client.post("/api/sizing", json=body).json()["diurnal_balance"]["by_year"]
+
+    assert sum(year["to_battery"]) == pytest.approx(0.0)
+    assert sum(year["from_battery"]) == pytest.approx(0.0)

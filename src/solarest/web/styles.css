@@ -28,6 +28,15 @@
   --series-5: #e87ba4;
   --series-6: #008300;
 
+  /* Energy-flow colours. Semantic, not categorical: sunlight is warm, the
+     battery is green, and grid purchase is the flat grey you pay for. */
+  --flow-solar: #eda100;
+  --flow-battery: #1baf7a;
+  --flow-grid: #8a8880;
+  --flow-charge: #7ed3b2;
+  --flow-export: #6da7ec;
+  --flow-demand: #0b0b0b;
+
   /* Sequential blue ramp, light -> dark, for magnitude heatmaps. */
   --ramp: #cde2fb,#9ec5f4,#6da7ec,#3987e5,#2a78d6,#256abf,#184f95,#0d366b;
 
@@ -66,6 +75,13 @@
     --series-5: #d55181;
     --series-6: #008300;
 
+    --flow-solar: #c98500;
+    --flow-battery: #199e70;
+    --flow-grid: #7b7972;
+    --flow-charge: #2f7d61;
+    --flow-export: #3987e5;
+    --flow-demand: #ffffff;
+
     --ramp: #0d366b,#184f95,#256abf,#2a78d6,#3987e5,#6da7ec,#9ec5f4,#cde2fb;
 
     --warn-bg: #33280f;
@@ -95,6 +111,12 @@
   --series-4: #c98500;
   --series-5: #d55181;
   --series-6: #008300;
+  --flow-solar: #c98500;
+  --flow-battery: #199e70;
+  --flow-grid: #7b7972;
+  --flow-charge: #2f7d61;
+  --flow-export: #3987e5;
+  --flow-demand: #ffffff;
   --ramp: #0d366b,#184f95,#256abf,#2a78d6,#3987e5,#6da7ec,#9ec5f4,#cde2fb;
   --warn-bg: #33280f;
   --warn-border: #6b5620;
@@ -309,6 +331,15 @@ button.small { font-size: 0.8rem; padding: 5px 10px; }
   font-size: 0.8rem; line-height: 1.4; max-width: 240px;
 }
 .chart-tooltip .tip-muted { color: var(--text-muted); }
+/* Inline colour key inside a tooltip, so a six-way breakdown stays readable. */
+.chart-tooltip .tip-swatch {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: baseline;
+}
 
 .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 12px; }
 .legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; color: var(--text-secondary); }
@@ -358,3 +389,113 @@ button.small { font-size: 0.8rem; padding: 5px 10px; }
   border-top: 1px solid var(--border);
   color: var(--text-muted); font-size: 0.8rem;
 }
+
+/* ------------------------------------------------------- battery sizing */
+
+/* Segmented control: radios styled as a single row of buttons. The input
+ * stays in the accessibility tree and drives the appearance via :checked. */
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  margin-bottom: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+.segmented label { flex: 1; margin: 0; font-weight: 450; }
+/* Visually hidden but still focusable: a zero-size input is unreliably
+ * reachable by keyboard, so keep a 1px box and clip it. */
+.segmented input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.segmented span {
+  display: block;
+  padding: 6px 4px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.segmented input:checked + span {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font-weight: 550;
+  box-shadow: 0 1px 2px rgb(16 15 12 / 10%);
+}
+.segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.demand-pane { margin-bottom: 4px; }
+
+.month-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.month-grid label {
+  margin: 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.month-grid input { margin-bottom: 0; padding: 5px 7px; font-size: 0.82rem; }
+
+/* Month picker above the typical-day chart. */
+.month-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.month-picker button {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.month-picker button:hover { color: var(--text-primary); border-color: var(--text-muted); }
+.month-picker button[aria-pressed="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Hover columns on the day profile: a faint wash marks the active hour. */
+.hour-hit:hover, .hour-hit:focus-visible {
+  fill: var(--text-primary);
+  fill-opacity: 0.05;
+  outline: none;
+}
+
+.confidence-bands {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+.band-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: 9px;
+  font-size: 0.85rem;
+}
+.band-row strong { font-variant-numeric: tabular-nums; }
+.band-row .band-label { color: var(--text-secondary); }
+.band-row .band-spread { font-size: 0.76rem; color: var(--text-muted); }

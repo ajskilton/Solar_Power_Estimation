@@ -391,3 +391,240 @@ export function table(container, columns, rows) {
   tableEl.append(head, body);
   container.replaceChildren(tableEl);
 }
+
+/**
+ * The energy balance across a typical day, as a diverging stacked area.
+ *
+ * Above the axis is where the household's demand came from — sunlight used as
+ * it arrives, then the battery, then whatever had to be bought. Below the axis
+ * is where generation went when it exceeded demand: into the battery, or out
+ * to the grid. A dashed line traces total generation.
+ *
+ * Both directions share one kW-per-pixel scale, so a kilowatt bought looks
+ * exactly as big as a kilowatt exported. Areas are stepped rather than
+ * smoothed because the underlying data is an hourly mean — a curve through the
+ * midpoints would imply detail the model does not have.
+ *
+ * @param {HTMLElement} container Element to render into.
+ * @param {object} options
+ * @param {Array<{label:string,color:string,values:number[]}>} options.supply
+ *   Stacked upward, in order: what met demand.
+ * @param {Array<{label:string,color:string,values:number[]}>} options.surplus
+ *   Stacked downward: where the extra generation went.
+ * @param {number[]} options.generation Total generation, drawn as a line.
+ * @param {string} [options.unit] Unit for labels and tooltips.
+ * @param {(hour:number)=>string} options.describe Tooltip text builder.
+ */
+export function dayProfile(container, options) {
+  const {
+    supply, surplus, generation, unit = "kW",
+    format = (v) => v.toFixed(2), describe,
+  } = options;
+
+  responsive(container, 380, (width, height) => {
+    const svg = el("svg", { width, height, class: "chart", "aria-hidden": "true" });
+    const ink = token(container, "--text-primary", "#111");
+    const muted = token(container, "--text-muted", "#777");
+    const gridLine = token(container, "--grid", "#e5e5e5");
+    const surface = token(container, "--surface-1", "#fff");
+
+    const pad = { top: 14, right: 12, bottom: 30, left: 54 };
+    const plotW = width - pad.left - pad.right;
+    const plotH = height - pad.top - pad.bottom;
+    const x = (hour) => pad.left + (hour / 24) * plotW;
+
+    const totalAt = (stack, h) =>
+      stack.reduce((sum, s) => sum + Math.max(0, s.values[h] || 0), 0);
+    const hours = Array.from({ length: 24 }, (_, h) => h);
+    const aboveMax = Math.max(...hours.map((h) => totalAt(supply, h)), ...generation, 0);
+    const belowMax = Math.max(...hours.map((h) => totalAt(surplus, h)), 0);
+
+    // One step for both halves, so the two directions stay comparable.
+    const { step } = niceScale(Math.max(aboveMax, belowMax, 0.001), 3);
+    const aboveTop = Math.max(step, Math.ceil(aboveMax / step) * step);
+    const belowTop = Math.ceil(belowMax / step) * step;
+    const span = aboveTop + belowTop;
+    const y = (value) => pad.top + ((aboveTop - value) / span) * plotH;
+
+    for (let tick = -belowTop; tick <= aboveTop + 1e-9; tick += step) {
+      const zero = Math.abs(tick) < 1e-9;
+      svg.appendChild(el("line", {
+        x1: pad.left, x2: pad.left + plotW, y1: y(tick), y2: y(tick),
+        stroke: zero ? muted : gridLine, "stroke-width": zero ? 1.25 : 1,
+      }));
+      const label = el("text", {
+        x: pad.left - 8, y: y(tick) + 4, "text-anchor": "end",
+        class: "axis-label", fill: muted,
+      });
+      label.textContent = format(Math.abs(tick));
+      svg.appendChild(label);
+    }
+
+    /** Stepped band between two per-hour boundaries, as a closed path. */
+    const band = (lo, hi) => {
+      const parts = [`M${x(0)},${y(hi[0])}`];
+      for (let h = 0; h < 24; h += 1) {
+        parts.push(`L${x(h)},${y(hi[h])}`, `L${x(h + 1)},${y(hi[h])}`);
+      }
+      for (let h = 23; h >= 0; h -= 1) {
+        parts.push(`L${x(h + 1)},${y(lo[h])}`, `L${x(h)},${y(lo[h])}`);
+      }
+      return `${parts.join(" ")} Z`;
+    };
+
+    const drawStack = (stack, sign, parent) => {
+      const cursor = new Array(24).fill(0);
+      for (const series of stack) {
+        const lo = cursor.slice();
+        const hi = cursor.map((base, h) => base + Math.max(0, series.values[h] || 0));
+        parent.appendChild(el("path", {
+          d: band(lo.map((v) => v * sign), hi.map((v) => v * sign)),
+          fill: series.color, "fill-opacity": 0.92,
+        }));
+        hi.forEach((v, h) => { cursor[h] = v; });
+      }
+    };
+    const fills = el("g");
+    svg.appendChild(fills);
+    drawStack(supply, 1, fills);
+    drawStack(surplus, -1, fills);
+
+    // Generation on top of the fills, so it reads as a reference not a layer.
+    const line = [];
+    for (let h = 0; h < 24; h += 1) {
+      line.push(`${h === 0 ? "M" : "L"}${x(h)},${y(generation[h])}`, `L${x(h + 1)},${y(generation[h])}`);
+    }
+    svg.appendChild(el("path", {
+      d: line.join(" "), fill: "none", stroke: ink, "stroke-width": 1.75,
+      "stroke-dasharray": "5 3", "stroke-opacity": 0.75, "stroke-linejoin": "round",
+    }));
+
+    for (let h = 0; h < 24; h += 3) {
+      const label = el("text", {
+        x: x(h), y: height - 10, "text-anchor": "middle", class: "axis-label", fill: muted,
+      });
+      label.textContent = `${String(h).padStart(2, "0")}`;
+      svg.appendChild(label);
+    }
+
+    // Full-height hover targets: one per hour, so the whole column responds.
+    hours.forEach((h) => {
+      const hit = el("rect", {
+        x: x(h), y: pad.top, width: plotW / 24, height: plotH,
+        fill: "transparent", class: "hour-hit",
+      });
+      makeInteractive(hit, () => describe(h));
+      hit.setAttribute("aria-label", describe(h).replace(/<[^>]+>/g, " "));
+      svg.appendChild(hit);
+    });
+
+    const caption = el("text", {
+      x: pad.left, y: pad.top - 2, class: "axis-label", fill: muted,
+      stroke: surface, "stroke-width": 3, "paint-order": "stroke",
+    });
+    caption.textContent = `${unit} — above: demand met · below: surplus`;
+    svg.appendChild(caption);
+
+    return svg;
+  });
+}
+
+/**
+ * A continuous relationship as a stepped-free line with points, plus an
+ * optional marked value.
+ *
+ * Used for the battery sizing curve, where capacity is genuinely continuous —
+ * bars would imply a set of discrete options rather than a curve with a knee.
+ *
+ * @param {HTMLElement} container Element to render into.
+ * @param {object} options
+ * @param {number[]} options.x Domain values.
+ * @param {number[]} options.y Range values.
+ * @param {number} [options.markX] Domain value to highlight.
+ * @param {string} options.xLabel Axis caption.
+ * @param {string} options.unit Unit shown in tooltips.
+ * @param {(i:number)=>string} options.describe Tooltip text builder.
+ */
+export function curveChart(container, options) {
+  const {
+    x: xs, y: ys, markX, xLabel, unit,
+    format = (v) => v.toFixed(0), describe,
+  } = options;
+
+  responsive(container, 260, (width, height) => {
+    const svg = el("svg", { width, height, class: "chart", "aria-hidden": "true" });
+    const ink = token(container, "--text-primary", "#111");
+    const muted = token(container, "--text-muted", "#777");
+    const gridLine = token(container, "--grid", "#e5e5e5");
+    const accent = token(container, "--accent", "#2a78d6");
+    const surface = token(container, "--surface-1", "#fff");
+
+    const pad = { top: 16, right: 16, bottom: 38, left: 58 };
+    const plotW = width - pad.left - pad.right;
+    const plotH = height - pad.top - pad.bottom;
+
+    const xMax = Math.max(...xs) || 1;
+    const scale = niceScale(Math.max(...ys));
+    const px = (v) => pad.left + (v / xMax) * plotW;
+    const py = (v) => pad.top + plotH - (v / scale.max) * plotH;
+
+    for (let tick = 0; tick <= scale.max + 1e-9; tick += scale.step) {
+      svg.appendChild(el("line", {
+        x1: pad.left, x2: pad.left + plotW, y1: py(tick), y2: py(tick),
+        stroke: gridLine, "stroke-width": 1,
+      }));
+      const label = el("text", {
+        x: pad.left - 8, y: py(tick) + 4, "text-anchor": "end",
+        class: "axis-label", fill: muted,
+      });
+      label.textContent = format(tick);
+      svg.appendChild(label);
+    }
+
+    svg.appendChild(el("path", {
+      d: xs.map((v, i) => `${i === 0 ? "M" : "L"}${px(v)},${py(ys[i])}`).join(" "),
+      fill: "none", stroke: accent, "stroke-width": 2.25,
+      "stroke-linejoin": "round", "stroke-linecap": "round",
+    }));
+
+    if (markX !== undefined && markX > 0) {
+      svg.appendChild(el("line", {
+        x1: px(markX), x2: px(markX), y1: pad.top, y2: pad.top + plotH,
+        stroke: ink, "stroke-width": 1.5, "stroke-dasharray": "4 3", "stroke-opacity": 0.55,
+      }));
+      const badge = el("text", {
+        x: px(markX), y: pad.top + 10, "text-anchor": "middle", class: "axis-label",
+        fill: ink, stroke: surface, "stroke-width": 3, "paint-order": "stroke",
+      });
+      badge.textContent = "suggested";
+      svg.appendChild(badge);
+    }
+
+    xs.forEach((v, i) => {
+      const dot = el("circle", {
+        cx: px(v), cy: py(ys[i]), r: 4.5,
+        fill: v === markX ? ink : accent, stroke: surface, "stroke-width": 1.5,
+      });
+      makeInteractive(dot, () => describe(i));
+      dot.setAttribute("aria-label", describe(i).replace(/<[^>]+>/g, " "));
+      svg.appendChild(dot);
+
+      if (i === 0 || i === xs.length - 1 || xs.length <= 8 || i % 2 === 0) {
+        const label = el("text", {
+          x: px(v), y: height - 20, "text-anchor": "middle", class: "axis-label", fill: muted,
+        });
+        label.textContent = String(v);
+        svg.appendChild(label);
+      }
+    });
+
+    const caption = el("text", {
+      x: pad.left + plotW / 2, y: height - 4, "text-anchor": "middle",
+      class: "axis-label", fill: muted,
+    });
+    caption.textContent = xLabel;
+    svg.appendChild(caption);
+
+    return svg;
+  });
+}

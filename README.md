@@ -43,6 +43,8 @@ good year and a poor one — not a single number pretending to be certain.
 - **A loss breakdown** — where the sunlight goes between the panel and the meter.
 - **An 8760-hour typical year**, downloadable as CSV.
 - Optionally, the **best tilt and azimuth** for the site.
+- Optionally, **battery sizing** against the household's own consumption — see
+  below.
 
 ---
 
@@ -74,6 +76,9 @@ profiles stay comparable across the seasons.
 
 Give it what the household uses as well as what the roof makes, and it works
 out how much electricity never has to be bought.
+
+On the website, tick **Work out what a battery would save** in the sidebar.
+From the command line:
 
 ```bash
 solarest size 51.45 -2.59 --annual-kwh 3500 --battery-kwh 5
@@ -133,6 +138,25 @@ generation and demand, which is exactly what the load-shape assumption governs,
 so it also absorbs the error in that assumption. **Sizing a battery from monthly
 bills is defensible. Estimating no-battery self-consumption from the same data
 is not nearly as sound.**
+
+### A typical day
+
+The chart the rest of it exists to produce. Above the axis is where each hour's
+demand came from — sunlight used as it arrives, then the battery, then whatever
+had to be bought. Below the axis is where generation went when it exceeded
+demand: into the battery, or out to the grid. A dashed line traces total output,
+and the whole thing can be stepped through month by month.
+
+December is the month that decides a battery: grid import overnight and through
+the morning, an hour or two of direct sun around midday, then the battery
+carrying the evening peak until it runs flat. June, for a well-sized array, has
+no grid import at all and a large export band — which is the same picture read
+the other way round.
+
+Both halves share one kW-per-pixel scale, so a kilowatt bought looks exactly as
+big as a kilowatt exported. In midsummer that leaves the demand half looking
+thin next to the surplus, and that is not a drawing error: a 4 kWp roof really
+does make several times what the house draws on a June afternoon.
 
 ### The sizing curve
 
@@ -305,7 +329,7 @@ Treat the output as a planning guide with a realistic uncertainty of roughly
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                       # 321 tests
+pytest                       # 333 tests
 solarest serve --reload
 ```
 
@@ -332,6 +356,8 @@ src/solarest/
   api.py         FastAPI app
   cli.py         `solarest serve`, `estimate` and `size`
   web/           the single-page frontend (no build step, no dependencies)
+                   charts.js has bar, heatmap, stacked-bar, day-profile and
+                   curve charts, all hand-rolled SVG
 ```
 
 The frontend is plain HTML, CSS and ES modules with hand-rolled SVG charts —
@@ -341,8 +367,8 @@ no bundler, no framework, nothing fetched from a CDN.
 
 ## Where this is going
 
-Battery sizing is in, as a prototype: model layer, HTTP endpoint and CLI, with
-the web UI still to come. What is missing is money and panels.
+Battery sizing is in — model layer, HTTP endpoint, CLI and web UI. What is
+missing is money and panels.
 
 - **Tariffs.** Everything here is in kWh. Turning that into pounds needs import
   and export rates, and standing charges — at which point off-peak grid
