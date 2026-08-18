@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "solarest"
+version = "0.1.0"
+description = "Estimate the solar PV energy a location can generate over a year, from Open-Meteo reanalysis weather data."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+# pvlib and pandas are used only by tests/test_against_pvlib.py, which
+# cross-checks the model chain against an independent implementation.
+dev = ["pytest>=8.0", "pvlib>=0.11", "pandas>=2.0"]
+
+[project.scripts]
+solarest = "solarest.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+solarest = ["web/*.html", "web/*.css", "web/*.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["error::RuntimeWarning"]
