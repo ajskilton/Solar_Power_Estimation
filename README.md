@@ -70,6 +70,100 @@ profiles stay comparable across the seasons.
 
 ---
 
+## Battery sizing
+
+Give it what the household uses as well as what the roof makes, and it works
+out how much electricity never has to be bought.
+
+```bash
+solarest size 51.45 -2.59 --annual-kwh 3500 --battery-kwh 5
+solarest size 51.45 -2.59 --monthly-kwh 420,380,340,280,240,210,205,220,260,310,380,430
+solarest size 51.45 -2.59 --hourly-csv meter-export.csv        # the good one
+```
+
+The dispatch model is a greedy self-consumption controller, which is what a
+domestic hybrid inverter does out of the box: use generation the instant it
+arrives, store the surplus, discharge after dark. It respects usable capacity,
+charge and discharge power limits, and round-trip efficiency.
+
+### Three ways to describe the demand, and what each is worth
+
+| Input | Flag | What it gives you |
+|---|---|---|
+| Metered interval data | `--hourly-csv` | A firm answer. The load shape is known. |
+| Twelve monthly bills | `--monthly-kwh` | A good answer, plus an assumption. |
+| One annual figure | `--annual-kwh` | The same, with the months guessed too. |
+
+Interval data is accepted at any regular resolution — hourly, half-hourly,
+quarter-hourly — and summed down to hours. A leap year is fine; 29 February is
+dropped. Timestamp columns, headers, comments and byte-order marks are ignored,
+because supplier exports contain all of them.
+
+### The daytime fraction
+
+Where there is no metered data, the missing information is *when* the household
+uses electricity, and it is captured by a single number: the share of a
+weekday's consumption falling between 09:00 and 17:00.
+
+| Archetype | Daytime fraction | |
+|---|---|---|
+| `nine_to_five` | 25% | Out at work. **The default.** |
+| `working_from_home` | 35% | No commute, lunchtime bump. |
+| `home_all_day` | 39% | Retired, shift work, small children. |
+| `flat` | 33% | A diagnostic baseline, not a household. |
+
+Override it directly with `--daytime-fraction 0.31` when neither fits. Weekends
+default to somebody being home, because a household that is out on Tuesday is
+usually in on Sunday, and weekend days carry slightly more energy than weekdays.
+
+### Why the answer comes with a range
+
+Two households with identical bills can get very different value from the same
+battery, so quoting one number from billing data alone would be false precision.
+The estimator re-runs the dispatch either side of the daytime assumption and
+reports the spread — **twice**, with and without the battery:
+
+```
+Varying that assumption moves the battery result by 6%
+but the no-battery result by 20%.
+```
+
+That gap is the most useful thing here. A battery absorbs the mismatch between
+generation and demand, which is exactly what the load-shape assumption governs,
+so it also absorbs the error in that assumption. **Sizing a battery from monthly
+bills is defensible. Estimating no-battery self-consumption from the same data
+is not nearly as sound.**
+
+### The sizing curve
+
+Every run sweeps a range of capacities, because the shape of the curve is the
+actual decision aid. Illustrative, for a 4 kWp array making 3,600 kWh against
+3,500 kWh of consumption:
+
+```
+  kWh   avoided  self-suff  per extra kWh
+  0.0     1,328      37.9%            0
+  2.0     2,009      57.4%          334
+  4.0     2,585      73.9%          263
+  5.0     2,729      78.0%          144
+  6.5     2,797      79.9%           45      <- knee
+  10.0    2,804      80.1%            1
+```
+
+The last column is what each extra kWh of capacity buys. It falls off a cliff
+once the battery routinely reaches morning with charge to spare, and that knee
+is where to stop. `suggested_capacity_kwh` picks it automatically.
+
+### Not modelled
+
+Grid charging on an off-peak tariff (it can *raise* import while *lowering* the
+bill, so it belongs with a tariff model); DC coupling, which would capture some
+clipped energy; and battery degradation. Hourly resolution also slightly
+overstates direct self-consumption — with a battery in the loop the effect is
+small, since the battery absorbs that flicker in reality too.
+
+---
+
 ## Using it
 
 ### The website
@@ -108,6 +202,27 @@ print(result.typical_year.ac_kw)  # 8760 hourly values, kW
 reconciliation — so trying many system configurations at the same site is cheap.
 That is what makes the orientation search interactive.
 
+Sizing a battery against that year:
+
+```python
+from solarest import BatterySpec, HouseholdShape, size_for_household, synthesise
+
+load = synthesise(3500.0, household=HouseholdShape(archetype="nine_to_five"))
+sized = size_for_household(result.typical_year, load, BatterySpec(usable_capacity_kwh=5.0))
+
+print(sized.result.avoided_import_kwh, "kWh not bought from the grid")
+print(sized.result.self_sufficiency_pct, "% self-sufficient")
+print(sized.suggested_capacity_kwh, "kWh suggested")
+```
+
+Or from a smart-meter export, which needs no assumptions at all:
+
+```python
+from solarest import LoadProfile
+
+load = LoadProfile.from_hourly(readings)   # any regular interval
+```
+
 ### HTTP API
 
 | Endpoint | Purpose |
@@ -117,10 +232,16 @@ That is what makes the orientation search interactive.
 | `GET /api/geocode?q=` | Place-name search |
 | `POST /api/estimate` | The estimate, as JSON |
 | `POST /api/estimate.csv` | The typical year as an hourly CSV |
+| `POST /api/sizing` | Battery sizing for a household's consumption |
 
 ```bash
 curl -X POST localhost:8000/api/estimate -H 'content-type: application/json' \
   -d '{"latitude":51.4545,"longitude":-2.5879,"system":{"dc_capacity_kw":4}}'
+
+curl -X POST localhost:8000/api/sizing -H 'content-type: application/json' \
+  -d '{"latitude":51.4545,"longitude":-2.5879,
+       "consumption":{"annual_kwh":3500,"household":{"archetype":"nine_to_five"}},
+       "battery":{"usable_capacity_kwh":5}}'
 ```
 
 Interactive documentation is at `/docs`.
@@ -143,6 +264,13 @@ the cache exists to stay well inside them.
 offline development. It is clearly labelled in the API response and behind a
 banner in the UI: it has no clouds, so it overstates yield substantially — for
 London it returns roughly 1,700 kWh/kWp against a real figure nearer 950.
+
+This matters doubly for battery sizing. Clear-sky weather has no cloudy runs,
+so the battery never has to ride out four grey days — exactly the case the
+typical year exists to preserve. Offline runs will therefore show optimistic
+self-sufficiency *and* place the knee of the sizing curve at a smaller battery
+than real weather would. Use `--synthetic` to check the plumbing, never to size
+hardware.
 
 ---
 
@@ -177,9 +305,14 @@ Treat the output as a planning guide with a realistic uncertainty of roughly
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-pytest                       # 182 tests
+pytest                       # 321 tests
 solarest serve --reload
 ```
+
+On Windows PowerShell the activation step is `.\.venv\Scripts\Activate.ps1`,
+which needs `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` first. The
+`solarest` command only exists inside the activated environment; without it,
+`python -m solarest.cli` does the same job.
 
 Layout:
 
@@ -192,9 +325,12 @@ src/solarest/
   simulate.py    the model chain; SitePrecompute for cheap re-runs
   results.py     annual / monthly / diurnal aggregation, TMY assembly
   optimize.py    tilt and azimuth search
-  service.py     request models and the estimate use case
+  load.py        household demand, from meter data or from bills
+  battery.py     dispatch, the sizing curve, diminishing returns
+  sizing.py      demand against generation, and what the answer is worth
+  service.py     request models and the estimate and sizing use cases
   api.py         FastAPI app
-  cli.py         `solarest serve` and `solarest estimate`
+  cli.py         `solarest serve`, `estimate` and `size`
   web/           the single-page frontend (no build step, no dependencies)
 ```
 
@@ -205,19 +341,19 @@ no bundler, no framework, nothing fetched from a CDN.
 
 ## Where this is going
 
-The next stage is sizing: take a household's historical energy bills or
-half-hourly meter data, line it up against the 8760-hour typical year, and
-recommend a panel and battery size.
+Battery sizing is in, as a prototype: model layer, HTTP endpoint and CLI, with
+the web UI still to come. What is missing is money and panels.
 
-The pieces are already shaped for it:
-
-- The typical year keeps real day-to-day variability, which is what battery
-  sizing depends on.
-- It is in local standard time with no DST gaps, so it lines up cleanly with
-  metered consumption.
-- `optimise_orientation` takes a pluggable objective. Today it maximises total
-  generation; give it a load profile and the same search maximises
-  self-consumption or bill savings instead.
+- **Tariffs.** Everything here is in kWh. Turning that into pounds needs import
+  and export rates, and standing charges — at which point off-peak grid
+  charging becomes worth modelling, since it can raise import while lowering
+  the bill.
+- **Panel sizing.** `optimise_orientation` already takes a pluggable objective.
+  Today it maximises total generation; handing it a `LoadProfile` makes the
+  same search maximise self-consumption or bill savings instead, and sweeping
+  array size alongside battery size gives a surface rather than a curve.
+- **Payback.** Once tariffs and capital costs are in, the sizing curve becomes
+  a net-present-value curve, and the knee moves.
 
 ---
 

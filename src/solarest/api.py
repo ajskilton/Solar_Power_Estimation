@@ -17,9 +17,13 @@ from .pvmodel import MODULE_TYPES, MOUNTS
 from .results import REFERENCE_YEAR
 from .service import (
     EstimateRequest,
+    SizingRequest,
     default_loss_breakdown,
+    household_options,
     outcome_to_dict,
     run_estimate,
+    run_sizing,
+    sizing_to_dict,
 )
 from .weather import (
     DEFAULT_YEARS,
@@ -89,6 +93,7 @@ async def options() -> dict:
         "default_years": DEFAULT_YEARS,
         "max_years": MAX_YEARS,
         "reference_year": REFERENCE_YEAR,
+        "household_archetypes": household_options(),
     }
 
 
@@ -161,6 +166,28 @@ async def estimate_csv(request: EstimateRequest) -> StreamingResponse:
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.post("/api/sizing")
+async def sizing(request: SizingRequest) -> dict:
+    """Estimate how much grid import a battery would avoid for one household.
+
+    Takes the same site and system as ``/api/estimate``, plus the household's
+    consumption. Supply metered interval data for a firm answer, or monthly
+    bills with an assumption about when electricity is used -- the response
+    then carries a confidence band showing what that assumption is worth.
+
+    Returns:
+        The estimate payload, plus the energy balance, a battery sizing curve
+        and the monthly breakdown.
+    """
+    try:
+        outcome = await run_sizing(request, provider)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return sizing_to_dict(outcome, include_hourly=request.include_hourly)
 
 
 async def _run(request: EstimateRequest):
